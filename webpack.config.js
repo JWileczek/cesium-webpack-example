@@ -33,6 +33,16 @@ module.exports = [{
         }, {
             test: /\.(png|gif|jpg|jpeg|svg|xml|json)$/,
             use: ['url-loader']
+        }, {
+            test: /\.(csv|tsv)$/i,
+            loader: 'csv-loader',
+            options: {
+                header: true,
+                skipEmptyLines: true
+            }
+        }, {
+                test: /\.xml$/i,
+                use: ['xml-loader'],
         }]
     },
     plugins: [
