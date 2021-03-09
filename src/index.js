@@ -38,7 +38,6 @@ const csvData2 = require('./SatelliteData.csv');
 const shipCSV = require('./AISData.csv');
 
 var viewer = new Viewer('cesiumContainer', {
-    terrainProvider: createWorldTerrain(),
     selectionIndicator: false,
 });
 
@@ -174,7 +173,7 @@ viewer.scene.preUpdate.addEventListener((scene, currentTime) => {
             viewer.selectedEntity.point.color = Color.ORANGE;
             const shipsInRange = collectInDistance(satPos, currentTime, false);
             viewer.selectedEntity.description = buildSatelliteDescription(viewer.selectedEntity, shipsInRange, currentTime);
-            if (viewer.selectedEntity.polyline == null) {
+            if (viewer.selectedEntity.polyline == null || viewer.selectedEntity.polyline.positions == null) {
                 viewer.selectedEntity.polyline = createOrbitGraphics(viewer.selectedEntity.properties.tleCollection.getValue(currentTime));
             }
             lastUpdateTime = currentTime;
@@ -263,9 +262,6 @@ for (const key of Object.keys(satMap)) {
     const propBag = new PropertyBag();
     propBag.addProperty("tleCollection", satObj.tleCollection);
     const tleProp = new CallbackProperty(function (time, result) {
-        if (this.lastCalcTime != null && JulianDate.secondsDifference(time, this.lastCalcTime) < 1) {
-            return this.savedCart;
-        }
         const satRec = this.tleCollection.findDataForIntervalContainingDate(time);
         let posAndVel = propagate(satRec, dayjs(JulianDate.toDate(time)).tz('America/New_York').toDate());
         const gmst = gstime(dayjs(JulianDate.toDate(time)).tz('America/New_York').toDate());
@@ -274,7 +270,6 @@ for (const key of Object.keys(satMap)) {
             latitude  = geoPosVel.latitude,
             height    = geoPosVel.height * 1000;
         this.savedCart = new Cartesian3.fromRadians(longitude, latitude, height);
-        this.lastCalcTime = time;
         return this.savedCart;
     }, false);
     tleProp['tleCollection'] = satObj.tleCollection;
@@ -394,11 +389,12 @@ function createOrbitGraphics(tleCollection) {
         if (satRec == null) {
             return orbitPos;
         }
-        if (this.nextCalcTime != null && JulianDate.lessThan(time, this.nextCalcTime)) {
-            return this.savedPos;
-        }
         const radsPerMin = satRec.no; //Mean motion of satellite represented in Radians per Minute
         const minsForFullRotation = Math.round((2*Math.PI) / radsPerMin) + 1;
+        if (this.lastCalcTime != null && JulianDate.greaterThan(time, this.lastCalcTime) && JulianDate.lessThan(time, this.nextCalcTime)) {
+            return this.savedPos;
+        }
+
         if (minsForFullRotation > 1000) {
             return orbitPos;
         }
@@ -415,6 +411,7 @@ function createOrbitGraphics(tleCollection) {
             iMin += 1;
             JulianDate.addMinutes(startTime, 1, startTime);
         }
+        this.lastCalcTime = time;
         this.nextCalcTime = JulianDate.addMinutes(time, minsForFullRotation, new JulianDate());
         this.savedPos = orbitPos;
         return orbitPos;
