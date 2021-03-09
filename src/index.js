@@ -19,7 +19,8 @@ import {
     ScreenSpaceEventHandler, ScreenSpaceEventType,
     TimeInterval,
     TimeIntervalCollection,
-    Viewer
+    Viewer,
+    Math as CesiumMath,
 } from 'cesium';
 import { sgp4, twoline2satrec, gstime, propagate, eciToGeodetic, eciToEcf } from 'satellite.js';
 import "cesium/Build/Cesium/Widgets/widgets.css";
@@ -37,7 +38,8 @@ const csvData2 = require('./SatelliteData.csv');
 const shipCSV = require('./AISData.csv');
 
 var viewer = new Viewer('cesiumContainer', {
-    terrainProvider: createWorldTerrain()
+    terrainProvider: createWorldTerrain(),
+    selectionIndicator: false,
 });
 
 
@@ -170,11 +172,11 @@ viewer.scene.preUpdate.addEventListener((scene, currentTime) => {
 
             resetSatColors();
             viewer.selectedEntity.point.color = Color.ORANGE;
-            viewer.selectedEntity.polyline.show = true;
             const shipsInRange = collectInDistance(satPos, currentTime, false);
-            viewer.selectedEntity.description = buildSatelliteDescription(viewer.selectedEntity, shipsInRange);
-
-            viewer.selectionIndicator.viewModel.position = viewer.selectedEntity.position;
+            viewer.selectedEntity.description = buildSatelliteDescription(viewer.selectedEntity, shipsInRange, currentTime);
+            if (viewer.selectedEntity.polyline == null) {
+                viewer.selectedEntity.polyline = createOrbitGraphics(viewer.selectedEntity.properties.tleCollection.getValue(currentTime));
+            }
             lastUpdateTime = currentTime;
         }
     }
@@ -210,11 +212,12 @@ eventHandler.setInputAction((event) => {
             const satPos = Cartographic.fromCartesian(pickedEntity.position.getValue(currTime));
             colorShipsByDistance(satPos, currTime);
             const shipsInRange = collectInDistance(satPos, currTime, false);
-            viewer.selectedEntity.description = buildSatelliteDescription(viewer.selectedEntity, shipsInRange);
+            viewer.selectedEntity.description = buildSatelliteDescription(viewer.selectedEntity, shipsInRange, currTime);
             resetSatColors();
             viewer.selectedEntity.point.color = Color.ORANGE;
-            viewer.selectedEntity.polyline.show = true;
-            viewer.selectionIndicator.viewModel.position = viewer.selectedEntity.position;
+            if (viewer.selectedEntity.polyline == null || viewer.selectedEntity.polyline.positions == null) {
+                viewer.selectedEntity.polyline = createOrbitGraphics(viewer.selectedEntity.properties.tleCollection.getValue(currTime));
+            }
         }
     } else {
         revertSatelliteColors();
@@ -258,6 +261,7 @@ for (const key of Object.keys(satMap)) {
 
     satObj.tleCollection = new TimeIntervalCollection(tInts);
     const propBag = new PropertyBag();
+    propBag.addProperty("tleCollection", satObj.tleCollection);
     const tleProp = new CallbackProperty(function (time, result) {
         if (this.lastCalcTime != null && JulianDate.secondsDifference(time, this.lastCalcTime) < 1) {
             return this.savedCart;
@@ -286,6 +290,9 @@ for (const key of Object.keys(satMap)) {
         }
         const radsPerMin = satRec.no; //Mean motion of satellite represented in Radians per Minute
         const minsForFullRotation = Math.round((2*Math.PI) / radsPerMin) + 1;
+        if (minsForFullRotation > 1000) {
+            return orbitPos;
+        }
         let iMin = 0;
         let startTime = JulianDate.addMinutes(time, iMin, new JulianDate());
         while (iMin <= minsForFullRotation) {
@@ -309,16 +316,12 @@ for (const key of Object.keys(satMap)) {
         id: `Satellite: ${satObj.satellite}`,
         name: `Satellite: ${satObj.satellite}`,
         availability: satObj.tleCollection,
-        properties: propBag,
+        properties: {
+            tleCollection: satObj.tleCollection,
+        },
         point: new PointGraphics({
             color: Color.YELLOW,
             pixelSize: 15
-        }),
-        polyline: new PolylineGraphics({
-            positions: orbitCallbackProp,
-            width: 2,
-            material: Color.ALICEBLUE,
-            show: true,
         }),
         position: tleProp
     });
@@ -328,12 +331,31 @@ viewer.dataSources.add(satelliteSource);
 
 
 //BEGIN HELPER FUNCTIONS
-function buildSatelliteDescription(satellite, shipsInRange) {
+function buildSatelliteDescription(satellite, shipsInRange, time) {
     let shipNames = shipsInRange.map((shipEntity) => `<tr><td style="text-align: center; vertical-align: middle;">${shipEntity.name}</td></tr>`);
     if (shipNames.length === 0) {
         shipNames = [`<tr><td style="text-align: center; vertical-align: middle;">No ships found in range of ${satellite.name}.</td></tr>`];
     }
+    const satRec = satellite.properties.tleCollection.getValue(time).findDataForIntervalContainingDate(time);
+    const currInclination = CesiumMath.toDegrees(satRec.inclo);
+    const radsPerMin = satRec.no; //Mean motion of satellite represented in Radians per Minute
+    const minsForFullRotation = Math.round((2*Math.PI) / radsPerMin) + 1;
+    let orbitType = 'Unknown';
+    if (currInclination === 0.0) {
+        orbitType = 'Prograde equatorial';
+    } else if (currInclination > 0.0 && currInclination < 90.0) {
+        orbitType = 'Prograde';
+    } else if (currInclination === 90.0) {
+        orbitType = 'Polar Orbit';
+    } else if (currInclination > 90.0 && currInclination < 180.0) {
+        orbitType = 'Retrograde';
+    } else if (currInclination === 180.0) {
+        orbitType = 'Retrograde equatorial';
+    }
     return `<div>
+                <div>Orbit Type: ${orbitType}</div>
+                <div>Inclination (degrees): ${currInclination}</div>
+                <div>Orbit Period (minutes): ${minsForFullRotation}</div>
                 <table>
                 <th>Ships in Range</th>
                 ${shipNames.join('')}
@@ -365,10 +387,53 @@ function resetShipColors() {
     shipSource.entities.values.forEach((ship) => ship.point.color = Color.WHITE);
 }
 
+function createOrbitGraphics(tleCollection) {
+    const orbitCallbackProp = new CallbackProperty(function(time, result) {
+        let orbitPos = [];
+        const satRec = this.tleCollection.findDataForIntervalContainingDate(time);
+        if (satRec == null) {
+            return orbitPos;
+        }
+        if (this.nextCalcTime != null && JulianDate.lessThan(time, this.nextCalcTime)) {
+            return this.savedPos;
+        }
+        const radsPerMin = satRec.no; //Mean motion of satellite represented in Radians per Minute
+        const minsForFullRotation = Math.round((2*Math.PI) / radsPerMin) + 1;
+        if (minsForFullRotation > 1000) {
+            return orbitPos;
+        }
+        let iMin = 0;
+        let startTime = JulianDate.addMinutes(time, iMin, new JulianDate());
+        while (iMin <= minsForFullRotation) {
+            let posAndVel = propagate(satRec, dayjs(JulianDate.toDate(startTime)).tz('America/New_York').toDate());
+            const gmst = gstime(dayjs(JulianDate.toDate(startTime)).tz('America/New_York').toDate());
+            const geoPosVel = eciToGeodetic(posAndVel.position, gmst);
+            let longitude = geoPosVel.longitude,
+                latitude  = geoPosVel.latitude,
+                height    = geoPosVel.height * 1000;
+            orbitPos.push(new Cartesian3.fromRadians(longitude, latitude, height));
+            iMin += 1;
+            JulianDate.addMinutes(startTime, 1, startTime);
+        }
+        this.nextCalcTime = JulianDate.addMinutes(time, minsForFullRotation, new JulianDate());
+        this.savedPos = orbitPos;
+        return orbitPos;
+    }, false);
+    orbitCallbackProp['tleCollection'] = tleCollection;
+    return new PolylineGraphics({
+        positions: orbitCallbackProp,
+        width: 2,
+        material: Color.ALICEBLUE,
+        show: true,
+    });
+}
+
 function resetSatColors() {
     satelliteSource.entities.values.forEach((sat) => {
         sat.point.color = Color.YELLOW;
-        sat.polyline.show = false;
+        if (sat.polyline != null && sat !== viewer.selectedEntity) {
+            sat.polyline = null;
+        }
     });
 }
 
